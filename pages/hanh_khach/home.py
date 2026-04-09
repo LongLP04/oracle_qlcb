@@ -4,6 +4,7 @@ import pandas as pd
 import pydeck as pdk
 import unicodedata
 import hashlib
+import oracledb
 
 
 def _normalize_place(value: str) -> str:
@@ -47,6 +48,65 @@ def _build_alias_map() -> dict:
     }
 
 
+def _build_location_options(connection) -> tuple[list[str], dict]:
+    code_to_name = {
+        "HAN": "Hà Nội",
+        "SGN": "TP.Hồ Chí Minh",
+        "DAD": "Đà Nẵng",
+        "HPH": "Hải Phòng",
+        "VCA": "Cần Thơ",
+        "CXR": "Nha Trang",
+        "PQC": "Phú Quốc",
+        "DLI": "Đà Lạt",
+        "HUI": "Huế",
+        "VII": "Vinh",
+        "CBG": "Cao Bằng",
+        "BLU": "Bạc Liêu",
+        "XNG": "Chu Lai",
+        "THD": "Thanh Hóa",
+        "VDH": "Quảng Bình",
+        "VCL": "Quảng Nam",
+        "VKG": "Kiên Giang",
+        "BMV": "Đắk Lắk",
+        "UIH": "Bình Định",
+        "PXU": "Gia Lai",
+        "DTH": "Đồng Tháp",
+        "CAH": "Cà Mau",
+        "VDO": "Quảng Ninh",
+        "DIN": "Điện Biên",
+        "TBB": "Yên Bái",
+        "HNB": "Hòa Bình",
+        "VPH": "Phú Thọ",
+    }
+
+    success, rows = execute_query(
+        connection,
+        """
+        SELECT DISTINCT DIEMDI AS DIEM FROM CHUYEN_BAY
+        UNION
+        SELECT DISTINCT DIEMDEN AS DIEM FROM CHUYEN_BAY
+        """,
+    )
+    if not success or not rows:
+        return [], {}
+
+    options_map: dict[str, str] = {}
+    for row in rows:
+        raw_value = str(row.get("DIEM") or "").strip()
+        if not raw_value:
+            continue
+        lookup_key = raw_value.upper()
+        if lookup_key in code_to_name:
+            display = f"{lookup_key} ({code_to_name[lookup_key]})"
+            options_map.setdefault(display, lookup_key)
+        else:
+            options_map.setdefault(raw_value, raw_value)
+
+    options = list(options_map.keys())
+    options.sort()
+    return options, options_map
+
+
 def _match_search(value: str, query_tokens: list[str], alias_map: dict) -> bool:
     normalized_value = _normalize_place(value)
     if not normalized_value:
@@ -59,6 +119,38 @@ def _match_search(value: str, query_tokens: list[str], alias_map: dict) -> bool:
 
     searchable = " ".join([normalized_value] + list(all_aliases))
     return all(token in searchable for token in query_tokens)
+
+
+def _search_flights_by_fn(connection, diem_di: str, diem_den: str) -> list[dict]:
+    cursor = connection.cursor()
+    try:
+        ref_cursor = cursor.callfunc(
+            "FN_TIM_CHUYEN_BAY",
+            oracledb.CURSOR,
+            [diem_di, diem_den],
+        )
+        rows = ref_cursor.fetchall()
+        columns = [desc[0] for desc in ref_cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+    except Exception:
+        return []
+    finally:
+        cursor.close()
+
+
+def _filter_future_rows(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    df_rows = pd.DataFrame(rows)
+    if "NGAYGIOKHOIHANH" not in df_rows.columns:
+        return rows
+    df_rows["NGAYGIOKHOIHANH"] = pd.to_datetime(
+        df_rows["NGAYGIOKHOIHANH"],
+        errors="coerce",
+    )
+    now = pd.Timestamp.now()
+    df_rows = df_rows[df_rows["NGAYGIOKHOIHANH"] >= now]
+    return df_rows.to_dict("records")
 
 
 def render(connection):
@@ -96,20 +188,36 @@ def render(connection):
 
         st.markdown("<div class='section-card'>", unsafe_allow_html=True)
         st.markdown("<div class='section-title'>Tìm kiếm chuyến bay</div>", unsafe_allow_html=True)
-        search_text = st.text_input(
-            "Nhập tên thành phố, mã sân bay, hoặc tỉnh lân cận",
-            placeholder="Ví dụ: sgn, Sài Gòn, Cần Thơ, Khánh Hòa"
-        )
+        location_options, location_map = _build_location_options(connection)
+        location_options = [""] + location_options
+        with st.form("tim_chuyen_bay_form"):
+            col_a, col_b, col_c = st.columns([1, 1, 0.6])
+            with col_a:
+                diem_di = st.selectbox("Điểm đi", options=location_options)
+            with col_b:
+                diem_den = st.selectbox("Điểm đến", options=location_options)
+            with col_c:
+                submitted = st.form_submit_button("Tìm", use_container_width=True)
+
+        fn_rows = []
+        if submitted and diem_di and diem_den:
+            diem_di_value = location_map.get(diem_di, diem_di).strip()
+            diem_den_value = location_map.get(diem_den, diem_den).strip()
+            fn_rows = _search_flights_by_fn(connection, diem_di_value, diem_den_value)
+            fn_rows = _filter_future_rows(fn_rows)
+            if not fn_rows:
+                st.warning("Không tìm thấy chuyến bay chưa tới giờ bay theo điểm đi/đến đã chọn.")
         alias_map = _build_alias_map()
-        if search_text.strip():
-            tokens = [_normalize_place(token) for token in search_text.split() if token.strip()]
-            filtered_rows = []
-            for _, row in df.iterrows():
-                if _match_search(str(row["Điểm đi"]), tokens, alias_map) or _match_search(
-                    str(row["Điểm đến"]), tokens, alias_map
-                ):
-                    filtered_rows.append(row)
-            df_filtered = pd.DataFrame(filtered_rows, columns=df.columns)
+        if fn_rows:
+            df_filtered = pd.DataFrame(fn_rows)
+            rename_map = {
+                "MACB": "Mã chuyến bay",
+                "DIEMDI": "Điểm đi",
+                "DIEMDEN": "Điểm đến",
+                "NGAYGIOKHOIHANH": "Ngày giờ khởi hành",
+                "GIAVECOBAN": "Giá vé cơ bản",
+            }
+            df_filtered = df_filtered.rename(columns=rename_map)
         else:
             df_filtered = df
 

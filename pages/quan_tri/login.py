@@ -22,6 +22,7 @@ def render():
         if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
             st.session_state.user_role = "admin"
             st.session_state.admin_email = email
+            st.session_state.menu_option = "Dashboard Quản trị"
             st.success("Đăng nhập thành công")
             st.rerun()
         else:

@@ -76,6 +76,40 @@ def render(connection):
     st.markdown("</div>", unsafe_allow_html=True)
     st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
 
+    # ===== DOANH THU & TY LE LAP DAY (GOI FUNCTION DB) =====
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>Doanh thu và tỷ lệ lấp đầy</div>", unsafe_allow_html=True)
+
+    success_flights, flights = execute_query(
+        connection,
+        "SELECT MACB FROM CHUYEN_BAY ORDER BY NGAYGIOKHOIHANH DESC",
+    )
+    if success_flights and flights:
+        flight_ids = [row.get("MACB") for row in flights if row.get("MACB")]
+        selected_macb = st.selectbox("Chọn chuyến bay", options=flight_ids)
+
+        success_rev, rev_rows = execute_query(
+            connection,
+            "SELECT PKG_FLIGHT_MANAGEMENT.FN_DOANH_THU_CHUYEN_BAY(:macb) AS DOANH_THU FROM dual",
+            (selected_macb,),
+        )
+        success_fill, fill_rows = execute_query(
+            connection,
+            "SELECT FN_TY_LE_LAP_DAY(:macb) AS TY_LE FROM dual",
+            (selected_macb,),
+        )
+
+        col_rev, col_fill = st.columns(2)
+        doanh_thu = rev_rows[0].get("DOANH_THU") if success_rev and rev_rows else None
+        ty_le = fill_rows[0].get("TY_LE") if success_fill and fill_rows else None
+        col_rev.metric("Doanh thu chuyến bay", f"{doanh_thu:,.0f}đ" if doanh_thu is not None else "N/A")
+        col_fill.metric("Tỷ lệ lấp đầy", f"{ty_le:.2f}%" if ty_le is not None else "N/A")
+    else:
+        st.info("Chưa có dữ liệu chuyến bay để tính doanh thu và tỷ lệ lấp đầy.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
+
     # ===== BẢNG VÉ HỦY GẦN ĐÂY =====
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)
     st.markdown("<div class='section-title'>Vé đã hủy gần đây</div>", unsafe_allow_html=True)

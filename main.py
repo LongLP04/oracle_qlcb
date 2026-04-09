@@ -165,7 +165,7 @@ st.sidebar.title("Menu Quản lý")
 
 menu_map_admin = {
     "Trang chủ": "Trang chủ",
-    "Dashboard": "Dashboard",
+    "Dashboard Quản trị": "Dashboard Quản trị",
     "Báo cáo": "Báo cáo",
     "Danh sách chuyến bay": "Danh sách chuyến bay",
     "Thêm chuyến bay": "Thêm chuyến bay",
@@ -180,7 +180,7 @@ menu_map_guest = {
 
 menu_map = menu_map_admin if st.session_state.user_role == "admin" else menu_map_guest
 menu_labels = list(menu_map.keys())
-if "menu_option" not in st.session_state:
+if "menu_option" not in st.session_state or st.session_state.menu_option not in menu_map:
     st.session_state.menu_option = menu_labels[0]
 
 for label in menu_labels:
@@ -235,7 +235,7 @@ else:
         booking.render(st.session_state.connection)
     elif selected_route == "Vé đã đặt":
         my_tickets.render(st.session_state.connection)
-    elif selected_route == "Dashboard":
+    elif selected_route == "Dashboard Quản trị":
         if st.session_state.user_role == "admin":
             dashboard.render(st.session_state.connection)
         else:

@@ -8,6 +8,8 @@ import hashlib
 import uuid
 
 DEFAULT_BALANCE = 100000000
+ECONOMY_SPECIAL_SURCHARGE = 200000
+FIRST_CLASS_SURCHARGE = 500000
 
 
 def _normalize_place(value: str) -> str:
@@ -97,6 +99,40 @@ def _reset_booking_state() -> None:
     st.session_state.confirm_booking = False
 
 
+def _seat_class_and_price(seat_code: str, base_price: int) -> tuple[str, int, int]:
+    try:
+        seat_col = int(seat_code[1:])
+    except (TypeError, ValueError):
+        seat_col = 0
+
+    if seat_col <= 2:
+        surcharge = FIRST_CLASS_SURCHARGE
+        class_name = "Hạng nhất"
+    elif seat_col <= 4:
+        surcharge = ECONOMY_SPECIAL_SURCHARGE
+        class_name = "Phổ thông đặc biệt"
+    else:
+        surcharge = 0
+        class_name = "Phổ thông"
+    return class_name, base_price + surcharge, surcharge
+
+
+def _build_fare_breakdown(selected_seats: list[str], base_price: int) -> list[dict]:
+    summary = {}
+    for seat in selected_seats:
+        class_name, price, _ = _seat_class_and_price(seat, base_price)
+        if class_name not in summary:
+            summary[class_name] = {
+                "Hạng ghế": class_name,
+                "Số lượng": 0,
+                "Giá/vé": price,
+                "Thành tiền": 0,
+            }
+        summary[class_name]["Số lượng"] += 1
+        summary[class_name]["Thành tiền"] += price
+    return list(summary.values())
+
+
 
 def render(connection):
     """Quy trình đặt vé máy bay"""
@@ -160,6 +196,17 @@ def render(connection):
             st.write(f"Mã xác nhận: {popup['code']}")
             st.write(f"Chuyến bay: {popup['macb']} | {popup['route']}")
             st.write(f"Ghế: {', '.join(popup['seats'])}")
+            if popup.get("fare_breakdown"):
+                st.write("Chi tiết hạng vé:")
+                for item in popup["fare_breakdown"]:
+                    st.write(
+                        "- {hang}: {count} vé x {price:,.0f}đ = {total:,.0f}đ".format(
+                            hang=item["Hạng ghế"],
+                            count=item["Số lượng"],
+                            price=item["Giá/vé"],
+                            total=item["Thành tiền"],
+                        )
+                    )
             st.write(f"Tổng tiền: {popup['total']:,.0f}đ")
             st.write(f"Đã trừ: {popup['deducted']:,.0f}đ")
             st.write(f"Số dư còn lại: {popup['balance']:,.0f}đ")
@@ -566,10 +613,15 @@ def render(connection):
         
         seats_data = []
         for idx, seat in enumerate(sorted(selected_seats), 1):
+            class_name, seat_price, surcharge = _seat_class_and_price(
+                seat, booking_data["giavecoban"]
+            )
             seats_data.append({
                 'STT': idx,
                 'Ghế': seat,
-                'Giá': f"{booking_data['giavecoban']:,.0f}đ"
+                'Hạng ghế': class_name,
+                'Giá': f"{seat_price:,.0f}đ",
+                'Phụ thu': f"{surcharge:,.0f}đ",
             })
         
         df_seats = pd.DataFrame(seats_data)
@@ -578,12 +630,26 @@ def render(connection):
         st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
         
         # Tính tổng tiền
-        tong_tien = len(selected_seats) * booking_data['giavecoban']
+        tong_tien = sum(
+            _seat_class_and_price(seat, booking_data["giavecoban"])[1]
+            for seat in selected_seats
+        )
+        fare_breakdown = _build_fare_breakdown(
+            selected_seats, booking_data["giavecoban"]
+        )
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Số ghế", len(selected_seats))
-        col2.metric("Giá/vé", f"{booking_data['giavecoban']:,.0f}đ")
+        col2.metric("Giá gốc", f"{booking_data['giavecoban']:,.0f}đ")
         col3.metric("Tổng tiền", f"{tong_tien:,.0f}đ")
+
+        if fare_breakdown:
+            st.markdown("**Chi tiết theo hạng ghế:**")
+            st.dataframe(
+                pd.DataFrame(fare_breakdown),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         current_balance = _get_account_balance(
             connection, booking_data["socccd"], DEFAULT_BALANCE
@@ -770,7 +836,10 @@ def render(connection):
                         return
                     
                     if success_count == len(selected_seats):
-                        amount_deducted = success_count * booking_data["giavecoban"]
+                        amount_deducted = sum(
+                            _seat_class_and_price(seat, booking_data["giavecoban"])[1]
+                            for seat in selected_seats
+                        )
                         new_balance = current_balance - amount_deducted
                         if _update_account_balance(connection, booking_data["socccd"], new_balance):
                             st.info(
@@ -785,6 +854,7 @@ def render(connection):
                             "seats": sorted(selected_seats),
                             "total": amount_deducted,
                             "deducted": amount_deducted,
+                            "fare_breakdown": fare_breakdown,
                             "balance": new_balance,
                         }
                         st.session_state.last_booking_message = (

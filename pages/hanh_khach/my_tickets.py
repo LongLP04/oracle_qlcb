@@ -3,6 +3,7 @@ from database import execute_query, execute_update
 import pandas as pd
 import oracledb
 import uuid
+import re
 
 DEFAULT_BALANCE = 100000000
 ECONOMY_SPECIAL_SURCHARGE = 200000
@@ -31,14 +32,6 @@ def _update_account_balance(connection, socccd: str, new_balance: int) -> bool:
         (new_balance, socccd),
     )
     return success
-
-
-def _refund_rate(days_to_depart: float) -> float:
-    if days_to_depart <= 2:
-        return 0.60
-    if days_to_depart <= 7:
-        return 0.70
-    return 0.88
 
 
 def _seat_class_and_price(seat_code: str, base_price: int) -> tuple[str, int, int]:
@@ -86,6 +79,13 @@ def render(connection):
                 st.write(f"Hạng ghế: {popup['hang_ghe']}")
             if popup.get("giave") is not None:
                 st.write(f"Giá vé: {popup['giave']:,.0f}đ")
+            if popup.get("refund_percent") is not None and popup.get("fee_percent") is not None:
+                st.write(
+                    "Tỷ lệ hoàn/phí: {refund}% / {fee}%".format(
+                        refund=popup["refund_percent"],
+                        fee=popup["fee_percent"],
+                    )
+                )
             st.write(f"Hoàn tiền: {popup['refund']:,.0f}đ")
             st.write(f"Phí hủy: {popup['fee']:,.0f}đ")
             st.write(f"Đặt trước: {popup['days']:.1f} ngày")
@@ -287,61 +287,10 @@ def render(connection):
                     }
                     st.rerun()
                 if cols[3].button("Hủy vé", key=f"cancel_{mave}"):
-                    try:
-                        mave_id = int(mave)
-                        success_time, time_rows = execute_query(
-                            connection,
-                            """SELECT c.NGAYGIOKHOIHANH AS NGAY_BAY,
-                                      SYSTIMESTAMP AS DB_NOW,
-                                      c.GIAVECOBAN AS GIAVE,
-                                      v.SOGHE AS SOGHE
-                               FROM DAT_VE v
-                               JOIN CHUYEN_BAY c ON v.MACB = c.MACB
-                               WHERE v.MAVE = :mave""",
-                            (mave_id,)
-                        )
-                        if success_time and time_rows:
-                            ngay_bay = time_rows[0].get("NGAY_BAY")
-                            db_now = time_rows[0].get("DB_NOW")
-                            giave = time_rows[0].get("GIAVE")
-                            soghe = time_rows[0].get("SOGHE")
-                            class_name, seat_price, _ = _seat_class_and_price(
-                                soghe,
-                                int(giave or 0),
-                            )
-                            if ngay_bay and db_now:
-                                khoang_cach = ngay_bay - db_now
-                                if khoang_cach.total_seconds() <= 24 * 60 * 60:
-                                    st.warning("Sát giờ bay, không thể hủy vé!")
-                                    st.caption(f"Giờ DB: {db_now} | Giờ bay: {ngay_bay}")
-                                    return
-                            if ngay_bay and db_now and giave:
-                                days_to_depart = (ngay_bay - db_now).total_seconds() / 86400
-                                refund_amount = int(seat_price * _refund_rate(days_to_depart))
-                                fee_amount = int(seat_price - refund_amount)
-                                st.session_state.cancel_preview[mave_id] = {
-                                    "refund": refund_amount,
-                                    "fee": fee_amount,
-                                    "days": days_to_depart,
-                                    "giave": seat_price,
-                                    "hang_ghe": class_name,
-                                }
-                    except oracledb.DatabaseError as db_error:
-                        st.error(f"Lỗi Database: {str(db_error)}")
-                    except Exception as e:
-                        st.error(f"Lỗi: {str(e)}")
+                    st.session_state.cancel_preview[int(mave)] = True
 
-                preview = st.session_state.cancel_preview.get(int(mave))
-                if preview:
-                    st.warning(
-                        "Xác nhận hủy vé? Hạng: {hang} | Giá vé: {gia:,.0f}đ | Hoàn: {refund:,.0f}đ | Phí: {fee:,.0f}đ | Đặt trước {days:.1f} ngày".format(
-                            hang=preview.get("hang_ghe", ""),
-                            gia=preview["giave"],
-                            refund=preview["refund"],
-                            fee=preview["fee"],
-                            days=preview["days"],
-                        )
-                    )
+                if st.session_state.cancel_preview.get(int(mave)):
+                    st.warning("Xác nhận hủy vé? Hệ thống sẽ áp dụng % hoàn tiền theo quy định.")
                     yes_col, no_col = st.columns(2)
                     if yes_col.button("Có", key=f"confirm_cancel_{mave}"):
                         try:
@@ -356,16 +305,57 @@ def render(connection):
                             if ket_qua and str(ket_qua).upper().startswith("LOI"):
                                 st.error(str(ket_qua))
                             else:
+                                refund_percent = None
+                                fee_percent = None
+                                if ket_qua:
+                                    match = re.search(r"Hoan\s+(\d+)%.*Phi\s+(\d+)%", str(ket_qua))
+                                    if match:
+                                        refund_percent = int(match.group(1))
+                                        fee_percent = int(match.group(2))
+                                success_after, after_rows = execute_query(
+                                    connection,
+                                    """SELECT v.GIATHANHTOAN AS HOAN_TIEN,
+                                              c.GIAVECOBAN AS GIAVE,
+                                              v.SOGHE AS SOGHE,
+                                              c.NGAYGIOKHOIHANH AS NGAY_BAY,
+                                              SYSTIMESTAMP AS DB_NOW
+                                       FROM DAT_VE v
+                                       JOIN CHUYEN_BAY c ON v.MACB = c.MACB
+                                       WHERE v.MAVE = :mave""",
+                                    (mave_id,)
+                                )
+                                refund_amount = 0
+                                fee_amount = 0
+                                days_to_depart = 0
+                                hang_ghe = ""
+                                giave = 0
+                                if success_after and after_rows:
+                                    giave = after_rows[0].get("GIAVE") or 0
+                                    soghe = after_rows[0].get("SOGHE")
+                                    refund_amount = int(after_rows[0].get("HOAN_TIEN") or 0)
+                                    class_name, seat_price, _ = _seat_class_and_price(
+                                        soghe,
+                                        int(giave),
+                                    )
+                                    hang_ghe = class_name
+                                    fee_amount = max(int(seat_price) - refund_amount, 0)
+                                    ngay_bay = after_rows[0].get("NGAY_BAY")
+                                    db_now = after_rows[0].get("DB_NOW")
+                                    if ngay_bay and db_now:
+                                        days_to_depart = (ngay_bay - db_now).total_seconds() / 86400
+
                                 balance = _get_account_balance(connection, query["socccd"], DEFAULT_BALANCE)
                                 if balance is not None:
-                                    new_balance = balance + preview["refund"]
+                                    new_balance = balance + refund_amount
                                     if _update_account_balance(connection, query["socccd"], new_balance):
                                         st.session_state.cancel_popup = {
-                                            "refund": preview["refund"],
-                                            "fee": preview["fee"],
-                                            "days": preview["days"],
-                                            "hang_ghe": preview.get("hang_ghe", ""),
-                                            "giave": preview.get("giave", 0),
+                                            "refund": refund_amount,
+                                            "fee": fee_amount,
+                                            "days": days_to_depart,
+                                            "hang_ghe": hang_ghe,
+                                            "giave": giave,
+                                            "refund_percent": refund_percent,
+                                            "fee_percent": fee_percent,
                                             "balance": new_balance,
                                         }
                                 st.success(str(ket_qua) if ket_qua else "Hủy vé thành công")

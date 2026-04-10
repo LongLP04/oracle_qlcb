@@ -84,6 +84,35 @@ def render(connection):
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
+    success_planes, planes = execute_query(
+        connection,
+        """
+        SELECT MAMAYBAY, LOAIMAYBAY, TONGGHE
+        FROM MAY_BAY
+        WHERE TINHTRANG = 'San Sang'
+        ORDER BY MAMAYBAY
+        """,
+    )
+    if not success_planes or not planes:
+        st.warning("Không có máy bay sẵn sàng để chọn.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    plane_options = {}
+    for plane in planes:
+        code = str(plane.get("MAMAYBAY") or "").strip()
+        if not code:
+            continue
+        model = str(plane.get("LOAIMAYBAY") or "").strip()
+        seats = plane.get("TONGGHE")
+        if model and seats is not None:
+            label = f"{code} | {model} | {seats} ghế"
+        elif model:
+            label = f"{code} | {model}"
+        else:
+            label = code
+        plane_options[label] = code
+
     with st.form("add_flight_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -95,6 +124,7 @@ def render(connection):
             gio = st.time_input("Giờ khởi hành")
             giave = st.number_input("Giá vé cơ bản", min_value=0, step=10000)
             soghetrong = st.number_input("Số ghế trống", min_value=1, step=1)
+            plane_select = st.selectbox("Máy bay", options=list(plane_options.keys()))
 
         submit = st.form_submit_button("Thêm chuyến bay", use_container_width=True)
 
@@ -102,8 +132,13 @@ def render(connection):
         macb = (macb or "").strip()
         diem_di = (location_map.get(diem_di_select) or "").strip()
         diem_den = (location_map.get(diem_den_select) or "").strip()
+        mamaybay = (plane_options.get(plane_select) or "").strip()
         if not macb or not diem_di or not diem_den:
             st.error("Vui lòng nhập đầy đủ mã chuyến bay, điểm đi, điểm đến.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            return
+        if not mamaybay:
+            st.error("Vui lòng chọn máy bay.")
             st.markdown("</div>", unsafe_allow_html=True)
             return
 
@@ -113,11 +148,30 @@ def render(connection):
             st.markdown("</div>", unsafe_allow_html=True)
             return
 
+        success_conflict, conflict_rows = execute_query(
+            connection,
+            """
+            SELECT COUNT(*) AS CNT
+            FROM CHUYEN_BAY
+            WHERE MAMAYBAY = :mamaybay
+                            AND ABS(CAST(NGAYGIOKHOIHANH AS DATE) - CAST(:ngaygio AS DATE)) < (6/24)
+            """,
+            {
+                "mamaybay": mamaybay,
+                "ngaygio": thoi_gian,
+            },
+        )
+        if success_conflict and conflict_rows:
+            if int(conflict_rows[0].get("CNT", 0)) > 0:
+                st.error("Máy bay đã có chuyến bay trùng hoặc cách < 6 giờ. Vui lòng chọn máy bay khác.")
+                st.markdown("</div>", unsafe_allow_html=True)
+                return
+
         success, message = execute_update(
             connection,
             """
-            INSERT INTO CHUYEN_BAY (MACB, DIEMDI, DIEMDEN, NGAYGIOKHOIHANH, GIAVECOBAN, SOGHETRONG)
-            VALUES (:macb, :diemdi, :diemden, :ngaygio, :giave, :soghetrong)
+            INSERT INTO CHUYEN_BAY (MACB, DIEMDI, DIEMDEN, NGAYGIOKHOIHANH, GIAVECOBAN, SOGHETRONG, MAMAYBAY)
+            VALUES (:macb, :diemdi, :diemden, :ngaygio, :giave, :soghetrong, :mamaybay)
             """,
             {
                 "macb": macb,
@@ -126,6 +180,7 @@ def render(connection):
                 "ngaygio": thoi_gian,
                 "giave": giave,
                 "soghetrong": soghetrong,
+                "mamaybay": mamaybay,
             },
         )
 
